@@ -9,6 +9,8 @@ for (const key of required) {
   }
 }
 
+const trim = (value: string | undefined): string => (typeof value === "string" ? value.trim() : "");
+
 export const env = {
   port: Number(process.env.PORT ?? 3001),
   nodeEnv: process.env.NODE_ENV ?? "development",
@@ -16,4 +18,37 @@ export const env = {
   mongodbUri: process.env.MONGODB_URI as string,
   mongodbUriFallback: process.env.MONGODB_URI_FALLBACK,
   jwtSecret: process.env.JWT_SECRET as string,
+
+  /** Azure Blob — connection string from Storage account → Access keys */
+  azureStorageConnectionString: trim(process.env.AZURE_STORAGE_CONNECTION_STRING),
+  /** Document Intelligence — endpoint URL (no trailing slash) + key */
+  azureDocumentIntelligenceEndpoint: trim(process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT).replace(/\/+$/, ""),
+  azureDocumentIntelligenceKey: trim(process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY),
+  /** Azure OpenAI — resource endpoint, key, chat deployment name (e.g. gpt-4o-mini) */
+  azureOpenAiEndpoint: trim(process.env.AZURE_OPENAI_ENDPOINT).replace(/\/+$/, ""),
+  azureOpenAiKey: trim(process.env.AZURE_OPENAI_API_KEY),
+  azureOpenAiDeploymentChat: trim(process.env.AZURE_OPENAI_DEPLOYMENT_CHAT) || "gpt-4o-mini",
+  azureOpenAiApiVersion: trim(process.env.AZURE_OPENAI_API_VERSION) || "2024-02-01",
+  /** Optional Cognitive Search — create index in portal first (see docs) */
+  azureSearchEndpoint: trim(process.env.AZURE_SEARCH_ENDPOINT).replace(/\/+$/, ""),
+  azureSearchAdminKey: trim(process.env.AZURE_SEARCH_ADMIN_KEY),
+  azureSearchIndexName: trim(process.env.AZURE_SEARCH_INDEX_NAME),
 };
+
+export function isDocumentPipelineConfigured(): boolean {
+  return Boolean(
+    env.azureStorageConnectionString &&
+      env.azureDocumentIntelligenceEndpoint &&
+      env.azureDocumentIntelligenceKey &&
+      env.azureOpenAiEndpoint &&
+      env.azureOpenAiKey,
+  );
+}
+
+export function assertDocumentPipelineConfigured(): void {
+  if (!isDocumentPipelineConfigured()) {
+    throw new Error(
+      "Document upload is not configured. Set AZURE_STORAGE_CONNECTION_STRING, AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT, AZURE_DOCUMENT_INTELLIGENCE_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_API_KEY.",
+    );
+  }
+}
