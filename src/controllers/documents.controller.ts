@@ -24,6 +24,26 @@ const allowedMime = new Set([
   "image/bmp",
 ]);
 
+function formatServiceError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const e = error as Error & {
+    code?: string;
+    statusCode?: number;
+    details?: { error?: { code?: string; message?: string } };
+  };
+
+  const details = [
+    e.code ? `code=${e.code}` : "",
+    typeof e.statusCode === "number" ? `status=${e.statusCode}` : "",
+    e.details?.error?.code ? `serviceCode=${e.details.error.code}` : "",
+  ].filter(Boolean);
+
+  const detailText = details.length ? ` (${details.join(", ")})` : "";
+  const serviceMsg = e.details?.error?.message?.trim();
+  const base = serviceMsg || e.message || fallback;
+  return `${base}${detailText}`;
+}
+
 function safeFileName(name: string): string {
   return name.replace(/[^\w.\-()+ ]/g, "_").slice(0, 180) || "document";
 }
@@ -111,8 +131,9 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
   try {
     await uploadUserDocument(blobPath, file.buffer, contentType);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Blob upload failed";
-    res.status(502).json({ message: msg });
+    // eslint-disable-next-line no-console
+    console.error("[documents.upload] Blob upload failed", e);
+    res.status(502).json({ message: `Blob upload failed: ${formatServiceError(e, "Unknown blob error")}` });
     return;
   }
 
@@ -126,8 +147,11 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
     keyValuePairs = extracted.keyValuePairs;
     tablesPreview = extracted.tablesPreview;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Document analysis failed";
-    res.status(502).json({ message: msg });
+    // eslint-disable-next-line no-console
+    console.error("[documents.upload] Document analysis failed", e);
+    res
+      .status(502)
+      .json({ message: `Document analysis failed: ${formatServiceError(e, "Unknown analysis error")}` });
     return;
   }
 

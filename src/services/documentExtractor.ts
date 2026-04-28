@@ -35,9 +35,21 @@ export async function extractFromBuffer(buffer: Buffer): Promise<{
     new AzureKeyCredential(env.azureDocumentIntelligenceKey),
   );
 
-  const poller = await client.beginAnalyzeDocument("prebuilt-layout", buffer, {
-    features: [FormRecognizerFeature.KeyValuePairs],
-  });
+  let poller;
+  try {
+    poller = await client.beginAnalyzeDocument("prebuilt-layout", buffer, {
+      features: [FormRecognizerFeature.KeyValuePairs],
+    });
+  } catch (error) {
+    const e = error as Error & { code?: string; statusCode?: number };
+    // Some Document Intelligence resources reject KeyValuePairs on layout with 400 InvalidArgument.
+    // Retry without optional features so OCR/table extraction still succeeds.
+    if (e.code === "InvalidArgument" || e.statusCode === 400) {
+      poller = await client.beginAnalyzeDocument("prebuilt-layout", buffer);
+    } else {
+      throw error;
+    }
+  }
 
   const result = await poller.pollUntilDone();
 

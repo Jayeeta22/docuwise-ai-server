@@ -10,6 +10,13 @@ for (const key of required) {
 }
 
 const trim = (value: string | undefined): string => (typeof value === "string" ? value.trim() : "");
+const firstNonEmpty = (...values: Array<string | undefined>): string => {
+  for (const value of values) {
+    const normalized = trim(value);
+    if (normalized) return normalized;
+  }
+  return "";
+};
 
 export const env = {
   port: Number(process.env.PORT ?? 3001),
@@ -20,17 +27,29 @@ export const env = {
   jwtSecret: process.env.JWT_SECRET as string,
 
   /** Azure Blob — connection string from Storage account → Access keys */
-  azureStorageConnectionString: trim(process.env.AZURE_STORAGE_CONNECTION_STRING),
+  azureStorageConnectionString: firstNonEmpty(
+    process.env.AZURE_STORAGE_CONNECTION_STRING,
+    process.env.AZURE_STORAGE_ENDPOINT,
+  ),
   /** Document Intelligence — endpoint URL (no trailing slash) + key */
   azureDocumentIntelligenceEndpoint: trim(process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT).replace(/\/+$/, ""),
   azureDocumentIntelligenceKey: trim(process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY),
   /** Azure OpenAI — resource endpoint, key, chat deployment name (e.g. gpt-4o-mini) */
   azureOpenAiEndpoint: trim(process.env.AZURE_OPENAI_ENDPOINT).replace(/\/+$/, ""),
   azureOpenAiKey: trim(process.env.AZURE_OPENAI_API_KEY),
-  azureOpenAiDeploymentChat: trim(process.env.AZURE_OPENAI_DEPLOYMENT_CHAT) || "gpt-4o-mini",
-  azureOpenAiApiVersion: trim(process.env.AZURE_OPENAI_API_VERSION) || "2024-02-01",
+  azureOpenAiDeploymentChat: firstNonEmpty(
+    process.env.AZURE_OPENAI_DEPLOYMENT_CHAT,
+    process.env.AZURE_DEPLOYMENT,
+  ) || "gpt-4o-mini",
+  azureOpenAiApiVersion: firstNonEmpty(
+    process.env.AZURE_OPENAI_API_VERSION,
+    process.env.AZURE_API_VERSION,
+  ) || "2024-02-01",
   /** Optional Cognitive Search — create index in portal first (see docs) */
-  azureSearchEndpoint: trim(process.env.AZURE_SEARCH_ENDPOINT).replace(/\/+$/, ""),
+  azureSearchEndpoint: firstNonEmpty(
+    process.env.AZURE_SEARCH_ENDPOINT,
+    process.env.AZURE_AISEARCH_ENDPOINT,
+  ).replace(/\/+$/, ""),
   azureSearchAdminKey: trim(process.env.AZURE_SEARCH_ADMIN_KEY),
   azureSearchIndexName: trim(process.env.AZURE_SEARCH_INDEX_NAME),
 };
