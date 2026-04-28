@@ -2,9 +2,11 @@
   "name": "docuwise-ai-server",
   "version": "1.0.0",
   "description": "Node.js REST API powering an AI document intelligence portal. Integrates Azure Document Intelligence for OCR and data extraction, Azure OpenAI for document Q&amp;A, Azure Cognitive Search for full-text search, and Azure Blob Storage for file management. Built with Express, MongoDB, and JWT authentication.",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon --watch src --ext ts --exec \"ts-node src/index.ts\"",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
   },
   "repository": {
     "type": "git",
@@ -25,15 +27,19 @@
     "@azure/storage-blob": "^12.31.0",
     "axios": "^1.15.2",
     "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.10.1",
     "mongoose": "^9.5.0",
     "multer": "^2.1.1",
     "openai": "^6.34.0"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.9",
+    "@types/morgan": "^1.9.10",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
