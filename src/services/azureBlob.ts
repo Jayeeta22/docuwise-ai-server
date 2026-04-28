@@ -30,3 +30,16 @@ export async function uploadUserDocument(
     blobHTTPHeaders: { blobContentType: contentType },
   });
 }
+
+export async function downloadUserDocument(blobPath: string): Promise<Buffer> {
+  const blob = getContainer().getBlockBlobClient(blobPath);
+  const response = await blob.download();
+  if (!response.readableStreamBody) {
+    throw new Error("Blob download stream is empty.");
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of response.readableStreamBody) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}

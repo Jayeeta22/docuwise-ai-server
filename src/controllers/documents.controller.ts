@@ -4,7 +4,7 @@ import multer from "multer";
 import { randomUUID } from "node:crypto";
 import { assertDocumentPipelineConfigured, isDocumentPipelineConfigured } from "../config/env";
 import { capExtractedText, DocumentModel } from "../models/Document.model";
-import { uploadUserDocument } from "../services/azureBlob";
+import { downloadUserDocument, uploadUserDocument } from "../services/azureBlob";
 import { chatAboutDocument } from "../services/documentChat";
 import { extractFromBuffer } from "../services/documentExtractor";
 import { indexDocumentRow } from "../services/searchIndex";
@@ -221,6 +221,36 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
     res.json({ reply });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Chat failed";
+    res.status(502).json({ message: msg });
+  }
+};
+
+export const getDocumentFile = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.userId!;
+  const { id } = req.params;
+
+  if (!mongoose.isValidObjectId(id)) {
+    res.status(400).json({ message: "Invalid document id." });
+    return;
+  }
+
+  const doc = await DocumentModel.findOne({
+    _id: id,
+    userId: new mongoose.Types.ObjectId(userId),
+  }).select("blobPath originalName contentType").lean();
+
+  if (!doc) {
+    res.status(404).json({ message: "Document not found." });
+    return;
+  }
+
+  try {
+    const file = await downloadUserDocument(doc.blobPath);
+    res.setHeader("Content-Type", doc.contentType || "application/octet-stream");
+    res.setHeader("Content-Disposition", `inline; filename="${doc.originalName}"`);
+    res.send(file);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Blob download failed";
     res.status(502).json({ message: msg });
   }
 };
