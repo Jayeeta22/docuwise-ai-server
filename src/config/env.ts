@@ -52,6 +52,16 @@ export const env = {
   ).replace(/\/+$/, ""),
   azureSearchAdminKey: trim(process.env.AZURE_SEARCH_ADMIN_KEY),
   azureSearchIndexName: trim(process.env.AZURE_SEARCH_INDEX_NAME),
+  /** Optional Azure Language service for document insights */
+  azureLanguageEndpoint: firstNonEmpty(
+    process.env.AZURE_LANGUAGE_ENDPOINT,
+    process.env.AZURE_TEXT_ANALYTICS_ENDPOINT,
+  ).replace(/\/+$/, ""),
+  azureLanguageKey: firstNonEmpty(
+    process.env.AZURE_LANGUAGE_KEY,
+    process.env.AZURE_TEXT_ANALYTICS_KEY,
+  ),
+  monthlyChatLimit: Number(process.env.MONTHLY_CHAT_LIMIT ?? 20),
 };
 
 export function isDocumentPipelineConfigured(): boolean {

@@ -43,3 +43,8 @@ export async function downloadUserDocument(blobPath: string): Promise<Buffer> {
   }
   return Buffer.concat(chunks);
 }
+
+export async function deleteUserDocument(blobPath: string): Promise<void> {
+  const blob = getContainer().getBlockBlobClient(blobPath);
+  await blob.deleteIfExists();
+}

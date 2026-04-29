@@ -1,3 +1,284 @@
+# DocLens AI — End-to-End Implementation Guide (Current State)
+
+This document is the source of truth for:
+- Full project flow (auth -> upload -> extraction -> insights -> translation -> chat -> quota)
+- Which function handles each step
+- Which Azure service is used where
+- Practical roadmap for stronger market fit at minimal cost
+
+---
+
+## 1) Current capabilities
+
+| Capability | API / UI | Key functions | Azure service |
+|---|---|---|---|
+| Auth (cookie JWT) | `/api/auth/*` + React auth pages | `requireAuth`, auth controllers/services | None |
+| Document upload | `POST /api/documents/upload` | `uploadMiddleware`, `uploadDocument`, `uploadUserDocument` | Azure Blob Storage |
+| OCR + layout extraction | upload pipeline | `extractFromBuffer` | Azure Document Intelligence (`prebuilt-layout`) |
+| Language insights | upload pipeline + detail UI | `getLanguageInsights` | Azure AI Language (Text Analytics) |
+| Document listing/details | `GET /api/documents`, `GET /api/documents/:id` | `listDocuments`, `getDocument` | MongoDB only |
+| Original file preview | `GET /api/documents/:id/file` | `getDocumentFile`, `downloadUserDocument` | Azure Blob Storage |
+| OCR/table translation in-place | selector on `DocumentDetailPage` | `translateDocument`, `translateDocumentText` | Azure OpenAI (translation prompt) |
+| Grounded document chat | `POST /api/documents/:id/chat` | `chatDocument`, `retrieveDocumentContext`, `chatAboutDocument` | Azure AI Search (optional), Azure OpenAI |
+| Monthly chat quota | chat panel + backend enforcement | `getChatUsage`, `ChatUsageModel`, quota checks in `chatDocument` | None |
+
+---
+
+## 2) End-to-end flow diagram
+
+```mermaid
+flowchart TD
+  U[User in React Client] --> A[Login/Register]
+  A -->|cookie token| B[Protected Routes]
+
+  B --> C[Upload Document]
+  C --> D[POST /api/documents/upload]
+  D --> E[Azure Blob: uploadUserDocument]
+  D --> F[Azure DI: extractFromBuffer prebuilt-layout]
+  D --> G[Azure Language: getLanguageInsights]
+  D --> H[(Mongo DocumentModel create)]
+  D --> I[Azure AI Search: indexDocumentRow optional]
+
+  B --> J[Open Document Detail]
+  J --> K[GET /api/documents/:id]
+  J --> L[GET /api/documents/:id/file]
+  K --> H
+  L --> E
+
+  J --> M[Select preview language]
+  M --> N[POST /api/documents/:id/translate]
+  N --> O[Azure OpenAI translateDocumentText]
+  O --> P[Show translated OCR + translated tables in same boxes]
+
+  J --> Q[Ask question in chat]
+  Q --> R[POST /api/documents/:id/chat]
+  R --> S[Check monthly quota ChatUsageModel]
+  S -->|limit exceeded| T[429 project limit exceeded]
+  S -->|allowed| U1[Azure Search retrieveDocumentContext optional]
+  U1 --> V[Fallback to extractedText if no search hits]
+  V --> W[Azure OpenAI chatAboutDocument]
+  W --> X[Increment monthly usage]
+  X --> Y[Return reply + usage remaining]
+```
+
+---
+
+## 3) Function-level map (backend)
+
+## `src/controllers/documents.controller.ts`
+- `uploadMiddleware`: `multer.single("file")`
+- `uploadDocument`:
+  - validates file type/size
+  - uploads original to Blob
+  - calls OCR extraction + language insights
+  - persists Mongo document
+  - optional Azure Search row index
+- `listDocuments`: metadata-only list for current user
+- `getDocument`: full detail (`extractedText`, `keyValuePairs`, `tablesPreview`, insights)
+- `getDocumentFile`: downloads blob and streams to browser preview
+- `translateDocument`: translates OCR + tables preview for selected target language
+- `chatDocument`:
+  - checks monthly quota
+  - retrieves search snippets (optional)
+  - falls back to local OCR context
+  - calls chat completion
+  - increments usage and returns remaining quota
+- `getChatUsage`: returns current month usage snapshot
+
+## `src/services/documentExtractor.ts`
+- `extractFromBuffer(buffer)`:
+  - uses Document Intelligence `prebuilt-layout`
+  - tries `keyValuePairs` feature and falls back gracefully on invalid argument
+  - returns `text`, `keyValuePairs`, `tablesPreview`
+
+## `src/services/languageInsights.ts`
+- `getLanguageInsights(text)`:
+  - detect language
+  - extract key phrases
+  - recognize entities
+  - returns structured insight object
+
+## `src/services/documentChat.ts`
+- `chatAboutDocument(documentContext, userMessage, replyLanguage)`
+- `translateDocumentText(text, targetLanguage)`
+
+## `src/services/searchIndex.ts`
+- `indexDocumentRow(doc)` for optional indexing
+- `retrieveDocumentContext(query, userId, documentId)` for keyword retrieval
+
+## Models
+- `src/models/Document.model.ts`: extracted content + insights storage
+- `src/models/ChatUsage.model.ts`: per-user monthly chat counters with unique index
+
+---
+
+## 4) Function-level map (frontend)
+
+## `docuwise-ai-client/src/pages/DocumentDetailPage.tsx`
+- Shows:
+  - original file preview
+  - OCR preview box
+  - tables preview box
+  - key-value + language insights
+  - chat + quota badge
+- Translation behavior:
+  - language selector next to OCR and tables headings
+  - default English shows original text
+  - non-English calls translate API and replaces text in same boxes
+
+## `docuwise-ai-client/src/store/apiSlice.ts`
+- `getDocument`
+- `chatDocument` (supports `replyLanguage`)
+- `getChatUsage`
+- `translateDocument`
+
+## `docuwise-ai-client/src/App.tsx` + `src/i18n.tsx`
+- UI language selector (EN/HI) for interface labels
+- Separate from document content translation
+
+---
+
+## 5) Azure service usage map
+
+| Azure service | Why used | Where in code | Cost notes |
+|---|---|---|---|
+| Azure Blob Storage | Store raw uploaded files | `services/azureBlob.ts` + `getDocumentFile` | Low cost, use lifecycle rules |
+| Azure Document Intelligence | OCR/layout, key-value/tables extraction | `services/documentExtractor.ts` | F0 has strict limits, good for prototyping |
+| Azure AI Language | Language detection, key phrases, entities | `services/languageInsights.ts` | Optional; keep enabled selectively |
+| Azure OpenAI | Chat grounded on doc + translation | `services/documentChat.ts` | Primary cost driver; quota cap added |
+| Azure AI Search (optional) | Keyword retrieval context for chat | `services/searchIndex.ts` | Free tier good for MVP keyword RAG |
+
+---
+
+## 6) Environment variables (server)
+
+Use `docuwise-ai-server/.env.example` and set:
+
+### Required core
+- `MONGODB_URI`
+- `JWT_SECRET`
+- `PORT`
+- `CLIENT_URL`
+
+### Required for document pipeline
+- `AZURE_STORAGE_CONNECTION_STRING`
+- `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
+- `AZURE_DOCUMENT_INTELLIGENCE_KEY`
+- `AZURE_OPENAI_ENDPOINT`
+- `AZURE_OPENAI_API_KEY`
+- `AZURE_OPENAI_DEPLOYMENT_CHAT`
+- `AZURE_OPENAI_API_VERSION`
+
+### Optional but recommended
+- `AZURE_LANGUAGE_ENDPOINT`
+- `AZURE_LANGUAGE_KEY`
+- `AZURE_SEARCH_ENDPOINT`
+- `AZURE_SEARCH_ADMIN_KEY`
+- `AZURE_SEARCH_INDEX_NAME`
+
+### Cost control
+- `MONTHLY_CHAT_LIMIT=20` (or `10` for stricter cap)
+
+---
+
+## 7) API reference (authenticated)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/documents` | List current user docs |
+| `GET` | `/api/documents/:id` | Full doc detail + insights |
+| `GET` | `/api/documents/:id/file` | Stream raw file for preview |
+| `POST` | `/api/documents/upload` | Upload and process file |
+| `POST` | `/api/documents/:id/translate` | Translate OCR + tables preview |
+| `POST` | `/api/documents/:id/chat` | Ask document-grounded question |
+| `GET` | `/api/documents/chat/limit` | Monthly usage snapshot |
+
+---
+
+## 8) Cost optimization checklist (minimal budget)
+
+1. Keep `MONTHLY_CHAT_LIMIT` small (`10`-`20`) per user.
+2. Use `gpt-4o-mini` (already in use) for translation and chat.
+3. Keep retrieval keyword-first via free Azure Search (avoid vector costs initially).
+4. Cache translation result per `(documentId + language)` in Mongo to avoid repeated OpenAI calls.
+5. Reduce translated context size (already partially capped).
+6. Run AI Language insights only on first upload (already aligned).
+7. Add rate limiting for upload and chat endpoints in production.
+
+---
+
+## 9) Is this project meaningful by market standard?
+
+Short answer: **Yes, meaningful for 2026 MVP market**.
+
+Why:
+- Solves a real workflow: upload -> extract -> understand -> ask -> translate.
+- Uses practical enterprise stack (MERN + Azure AI).
+- Includes security basics (auth, user-level ownership checks).
+- Includes cost-safety controls (monthly chat cap), which many prototypes miss.
+- Good fit for SMB/internal automation use cases (invoice reading, operations back-office, compliance checks).
+
+Current maturity level:
+- **Strong MVP / portfolio-ready**
+- Not yet enterprise-ready for regulated production without additional controls (audit trails, observability, PII handling, retry/idempotency, async processing).
+
+---
+
+## 10) High-impact improvements (vast scope, minimal cost)
+
+### A. Product value (highest ROI)
+1. Add structured extraction templates (invoice fields: vendor, invoice no, due date, totals).
+2. Add export actions (JSON/CSV) for accounting workflow.
+3. Save chat history per document for continuity.
+
+### B. Trust + quality
+1. Add source citations in chat reply (which snippet/section answered it).
+2. Add confidence indicators for extracted fields.
+3. Add human correction UI and persist corrected values.
+
+### C. Cost + scale
+1. Translation cache (document + language) to prevent repeated spend.
+2. Async processing queue for uploads (better UX and resilience).
+3. Add per-user and per-IP rate limits.
+
+### D. GTM-ready packaging
+1. Team workspace + role-based access.
+2. Stripe metering (free tier + paid chat/translation quota).
+3. Simple admin dashboard: usage, top docs, failure reasons.
+
+---
+
+## 11) Recommended next sprint plan (low cost)
+
+Week 1:
+- Translation cache in Mongo
+- Chat citation response format
+- Better error taxonomy for user messages
+
+Week 2:
+- Structured invoice schema extractor
+- CSV export
+- Basic analytics page (usage + quota remaining)
+
+Week 3:
+- Async job queue for upload pipeline
+- Retry policies and dead-letter logging
+- Basic observability (request IDs + timing logs)
+
+---
+
+## 12) Production readiness notes
+
+- Keep `.env` out of git.
+- Use private Blob container and signed access patterns.
+- Move secrets to Azure Key Vault.
+- Restrict CORS to exact production origin.
+- Add audit logging for document access and chat events.
+- Add data retention policy and user data deletion flow.
+
+---
+
+*Update this document whenever endpoints, env contracts, or AI orchestration behavior changes.*
 # DocLens AI — Phase 2 implementation guide
 
 This document explains **what was built**, **how the pieces connect**, and **how to configure Azure + run everything** step by step. It mirrors your “Day 0” Azure portal plan and maps it to this repo’s code.

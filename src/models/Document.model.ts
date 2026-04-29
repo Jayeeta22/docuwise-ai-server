@@ -1,6 +1,7 @@
 import mongoose, { Schema } from "mongoose";
 
 export type DocumentKeyValue = { key: string; value: string };
+export type DocumentEntity = { text: string; category: string; confidenceScore: number };
 
 export interface IDocument {
   userId: mongoose.Types.ObjectId;
@@ -13,6 +14,9 @@ export interface IDocument {
   keyValuePairs: DocumentKeyValue[];
   /** Short text summary of tables for UI / search snippet. */
   tablesPreview: string;
+  detectedLanguage: string;
+  keyPhrases: string[];
+  entities: DocumentEntity[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -37,6 +41,18 @@ const documentSchema = new Schema<IDocument>(
       default: [],
     },
     tablesPreview: { type: String, default: "" },
+    detectedLanguage: { type: String, default: "" },
+    keyPhrases: { type: [String], default: [] },
+    entities: {
+      type: [
+        {
+          text: { type: String, required: true },
+          category: { type: String, required: true },
+          confidenceScore: { type: Number, required: true },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true },
 );

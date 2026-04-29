@@ -3,11 +3,14 @@ import mongoose from "mongoose";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
 import { assertDocumentPipelineConfigured, isDocumentPipelineConfigured } from "../config/env";
+import { env } from "../config/env";
+import { ChatUsageModel } from "../models/ChatUsage.model";
 import { capExtractedText, DocumentModel } from "../models/Document.model";
-import { downloadUserDocument, uploadUserDocument } from "../services/azureBlob";
-import { chatAboutDocument } from "../services/documentChat";
+import { deleteUserDocument, downloadUserDocument, uploadUserDocument } from "../services/azureBlob";
+import { chatAboutDocument, translateDocumentText } from "../services/documentChat";
 import { extractFromBuffer } from "../services/documentExtractor";
-import { indexDocumentRow } from "../services/searchIndex";
+import { getLanguageInsights } from "../services/languageInsights";
+import { deleteDocumentRow, indexDocumentRow, retrieveDocumentContext } from "../services/searchIndex";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -46,6 +49,25 @@ function formatServiceError(error: unknown, fallback: string): string {
 
 function safeFileName(name: string): string {
   return name.replace(/[^\w.\-()+ ]/g, "_").slice(0, 180) || "document";
+}
+
+function getMonthKey(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+async function getUsageSnapshot(userId: string): Promise<{ limit: number; used: number; remaining: number; monthKey: string }> {
+  const monthKey = getMonthKey(new Date());
+  const usage = await ChatUsageModel.findOne({
+    userId: new mongoose.Types.ObjectId(userId),
+    monthKey,
+  })
+    .select("chatCount")
+    .lean();
+  const used = usage?.chatCount ?? 0;
+  const limit = Math.max(1, env.monthlyChatLimit || 20);
+  return { limit, used, remaining: Math.max(0, limit - used), monthKey };
 }
 
 export const uploadMiddleware = upload.single("file");
@@ -95,6 +117,9 @@ export const getDocument = async (req: Request, res: Response): Promise<void> =>
       extractedText: doc.extractedText,
       keyValuePairs: doc.keyValuePairs,
       tablesPreview: doc.tablesPreview,
+      detectedLanguage: doc.detectedLanguage,
+      keyPhrases: doc.keyPhrases,
+      entities: doc.entities,
       createdAt: doc.createdAt,
       updatedAt: doc.updatedAt,
     },
@@ -140,6 +165,9 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
   let extractedText = "";
   let keyValuePairs: { key: string; value: string }[] = [];
   let tablesPreview = "";
+  let detectedLanguage = "";
+  let keyPhrases: string[] = [];
+  let entities: Array<{ text: string; category: string; confidenceScore: number }> = [];
 
   try {
     const extracted = await extractFromBuffer(file.buffer);
@@ -155,6 +183,17 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
     return;
   }
 
+  try {
+    const insights = await getLanguageInsights(extractedText);
+    if (insights) {
+      detectedLanguage = insights.detectedLanguage;
+      keyPhrases = insights.keyPhrases;
+      entities = insights.entities;
+    }
+  } catch {
+    /* optional language service */
+  }
+
   const doc = await DocumentModel.create({
     userId: new mongoose.Types.ObjectId(userId),
     originalName,
@@ -164,6 +203,9 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
     extractedText,
     keyValuePairs,
     tablesPreview,
+    detectedLanguage,
+    keyPhrases,
+    entities,
   });
 
   void indexDocumentRow({
@@ -195,9 +237,11 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
 
   const userId = req.userId!;
   const { id } = req.params;
+  const documentId = String(id);
   const message = String((req.body as { message?: string })?.message ?? "").trim();
+  const replyLanguage = String((req.body as { replyLanguage?: string })?.replyLanguage ?? "English").trim() || "English";
 
-  if (!mongoose.isValidObjectId(id)) {
+  if (!mongoose.isValidObjectId(documentId)) {
     res.status(400).json({ message: "Invalid document id." });
     return;
   }
@@ -206,8 +250,17 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
     return;
   }
 
+  const usageSnapshot = await getUsageSnapshot(userId);
+  if (usageSnapshot.used >= usageSnapshot.limit) {
+    res.status(429).json({
+      message: "For your project, monthly chat limit exceeded.",
+      usage: usageSnapshot,
+    });
+    return;
+  }
+
   const doc = await DocumentModel.findOne({
-    _id: id,
+    _id: documentId,
     userId: new mongoose.Types.ObjectId(userId),
   }).lean();
 
@@ -217,10 +270,76 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
   }
 
   try {
-    const reply = await chatAboutDocument(doc.extractedText, message);
-    res.json({ reply });
+    const snippets = await retrieveDocumentContext(message, userId, documentId);
+    const fallbackContext = doc.extractedText.slice(0, 8_000);
+    const searchContext = snippets.join("\n\n---\n\n");
+    const combinedContext = searchContext || fallbackContext;
+    const reply = await chatAboutDocument(combinedContext, message, replyLanguage);
+    await ChatUsageModel.updateOne(
+      {
+        userId: new mongoose.Types.ObjectId(userId),
+        monthKey: usageSnapshot.monthKey,
+      },
+      { $inc: { chatCount: 1 } },
+      { upsert: true },
+    );
+
+    const usage = await getUsageSnapshot(userId);
+    res.json({ reply, usage });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Chat failed";
+    res.status(502).json({ message: msg });
+  }
+};
+
+export const getChatUsage = async (req: Request, res: Response): Promise<void> => {
+  const usage = await getUsageSnapshot(req.userId!);
+  res.json(usage);
+};
+
+export const translateDocument = async (req: Request, res: Response): Promise<void> => {
+  if (!isDocumentPipelineConfigured()) {
+    res.status(503).json({ message: "Translation service is not configured on the server." });
+    return;
+  }
+
+  const userId = req.userId!;
+  const documentId = String(req.params.id);
+  const targetLanguage = String((req.body as { targetLanguage?: string })?.targetLanguage ?? "").trim();
+
+  if (!mongoose.isValidObjectId(documentId)) {
+    res.status(400).json({ message: "Invalid document id." });
+    return;
+  }
+  if (!targetLanguage) {
+    res.status(400).json({ message: "targetLanguage is required." });
+    return;
+  }
+
+  const doc = await DocumentModel.findOne({
+    _id: documentId,
+    userId: new mongoose.Types.ObjectId(userId),
+  })
+    .select("extractedText tablesPreview")
+    .lean();
+
+  if (!doc) {
+    res.status(404).json({ message: "Document not found." });
+    return;
+  }
+  if (!doc.extractedText?.trim()) {
+    res.status(400).json({ message: "No extracted text available for translation." });
+    return;
+  }
+
+  try {
+    const [translatedExtractedText, translatedTablesPreview] = await Promise.all([
+      translateDocumentText(doc.extractedText, targetLanguage),
+      doc.tablesPreview?.trim() ? translateDocumentText(doc.tablesPreview, targetLanguage) : Promise.resolve(""),
+    ]);
+    res.json({ translatedExtractedText, translatedTablesPreview, targetLanguage });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Translation failed";
     res.status(502).json({ message: msg });
   }
 };
@@ -253,4 +372,35 @@ export const getDocumentFile = async (req: Request, res: Response): Promise<void
     const msg = e instanceof Error ? e.message : "Blob download failed";
     res.status(502).json({ message: msg });
   }
+};
+
+export const deleteDocument = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.userId!;
+  const documentId = String(req.params.id);
+
+  if (!mongoose.isValidObjectId(documentId)) {
+    res.status(400).json({ message: "Invalid document id." });
+    return;
+  }
+
+  const doc = await DocumentModel.findOne({
+    _id: documentId,
+    userId: new mongoose.Types.ObjectId(userId),
+  })
+    .select("blobPath")
+    .lean();
+
+  if (!doc) {
+    res.status(404).json({ message: "Document not found." });
+    return;
+  }
+
+  await DocumentModel.deleteOne({ _id: documentId, userId: new mongoose.Types.ObjectId(userId) });
+
+  await Promise.allSettled([
+    deleteUserDocument(doc.blobPath),
+    deleteDocumentRow(documentId),
+  ]);
+
+  res.json({ success: true });
 };
