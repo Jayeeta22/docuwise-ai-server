@@ -1,7 +1,7 @@
 import mongoose, { Schema } from "mongoose";
 
 export interface IChatUsage {
-  userId: mongoose.Types.ObjectId;
+  scope: "global";
   monthKey: string;
   chatCount: number;
   createdAt: Date;
@@ -10,13 +10,13 @@ export interface IChatUsage {
 
 const chatUsageSchema = new Schema<IChatUsage>(
   {
-    userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    scope: { type: String, required: true, default: "global", enum: ["global"], index: true },
     monthKey: { type: String, required: true },
     chatCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true },
 );
 
-chatUsageSchema.index({ userId: 1, monthKey: 1 }, { unique: true });
+chatUsageSchema.index({ scope: 1, monthKey: 1 }, { unique: true });
 
 export const ChatUsageModel = mongoose.model<IChatUsage>("ChatUsage", chatUsageSchema);

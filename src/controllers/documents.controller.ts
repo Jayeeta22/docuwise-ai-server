@@ -5,7 +5,13 @@ import { randomUUID } from "node:crypto";
 import { assertDocumentPipelineConfigured, isDocumentPipelineConfigured } from "../config/env";
 import { env } from "../config/env";
 import { ChatUsageModel } from "../models/ChatUsage.model";
-import { capExtractedText, DocumentModel } from "../models/Document.model";
+import {
+  capExtractedText,
+  DocumentModel,
+  type DocumentCategory,
+  type InvoiceFields,
+  type ReceiptFields,
+} from "../models/Document.model";
 import { deleteUserDocument, downloadUserDocument, uploadUserDocument } from "../services/azureBlob";
 import { chatAboutDocument, translateDocumentText } from "../services/documentChat";
 import { extractFromBuffer } from "../services/documentExtractor";
@@ -26,6 +32,8 @@ const allowedMime = new Set([
   "image/tiff",
   "image/bmp",
 ]);
+
+const allowedCategories = new Set<DocumentCategory>(["resume", "invoice", "receipt", "general"]);
 
 function formatServiceError(error: unknown, fallback: string): string {
   if (!(error instanceof Error)) return fallback;
@@ -57,10 +65,10 @@ function getMonthKey(date: Date): string {
   return `${year}-${month}`;
 }
 
-async function getUsageSnapshot(userId: string): Promise<{ limit: number; used: number; remaining: number; monthKey: string }> {
+async function getUsageSnapshot(): Promise<{ limit: number; used: number; remaining: number; monthKey: string }> {
   const monthKey = getMonthKey(new Date());
   const usage = await ChatUsageModel.findOne({
-    userId: new mongoose.Types.ObjectId(userId),
+    scope: "global",
     monthKey,
   })
     .select("chatCount")
@@ -74,9 +82,22 @@ export const uploadMiddleware = upload.single("file");
 
 export const listDocuments = async (req: Request, res: Response): Promise<void> => {
   const userId = req.userId!;
-  const docs = await DocumentModel.find({ userId: new mongoose.Types.ObjectId(userId) })
+
+  const requestedCategoryRaw = req.query.category;
+  const requestedCategory =
+    typeof requestedCategoryRaw === "string" ? requestedCategoryRaw.trim().toLowerCase() : undefined;
+
+  const filter: { userId: mongoose.Types.ObjectId; category?: DocumentCategory } = {
+    userId: new mongoose.Types.ObjectId(userId),
+  };
+
+  if (requestedCategory && allowedCategories.has(requestedCategory as DocumentCategory)) {
+    filter.category = requestedCategory as DocumentCategory;
+  }
+
+  const docs = await DocumentModel.find(filter)
     .sort({ createdAt: -1 })
-    .select("originalName contentType sizeBytes createdAt")
+    .select("originalName contentType sizeBytes createdAt category")
     .lean();
 
   res.json({
@@ -85,6 +106,7 @@ export const listDocuments = async (req: Request, res: Response): Promise<void> 
       originalName: d.originalName,
       contentType: d.contentType,
       sizeBytes: d.sizeBytes,
+      category: d.category,
       createdAt: d.createdAt,
     })),
   });
@@ -114,9 +136,12 @@ export const getDocument = async (req: Request, res: Response): Promise<void> =>
       originalName: doc.originalName,
       contentType: doc.contentType,
       sizeBytes: doc.sizeBytes,
+      category: doc.category,
       extractedText: doc.extractedText,
       keyValuePairs: doc.keyValuePairs,
       tablesPreview: doc.tablesPreview,
+      invoiceFields: doc.invoiceFields,
+      receiptFields: doc.receiptFields,
       detectedLanguage: doc.detectedLanguage,
       keyPhrases: doc.keyPhrases,
       entities: doc.entities,
@@ -153,6 +178,14 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
   const originalName = safeFileName(file.originalname || "upload");
   const blobPath = `${userId}/${randomUUID()}-${originalName}`;
 
+  const requestedCategoryRaw = (req.body as { category?: unknown }).category ?? "general";
+  const requestedCategory = String(requestedCategoryRaw).trim().toLowerCase();
+  if (!allowedCategories.has(requestedCategory as DocumentCategory)) {
+    res.status(400).json({ message: "Invalid category. Use resume, invoice, general (and receipts are auto-detected)." });
+    return;
+  }
+  const category = requestedCategory as DocumentCategory;
+
   try {
     await uploadUserDocument(blobPath, file.buffer, contentType);
   } catch (e) {
@@ -168,12 +201,18 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
   let detectedLanguage = "";
   let keyPhrases: string[] = [];
   let entities: Array<{ text: string; category: string; confidenceScore: number }> = [];
+  let finalCategory: DocumentCategory = category;
+  let invoiceFields: InvoiceFields | undefined = undefined;
+  let receiptFields: ReceiptFields | undefined = undefined;
 
   try {
-    const extracted = await extractFromBuffer(file.buffer);
+    const extracted = await extractFromBuffer(file.buffer, category);
     extractedText = capExtractedText(extracted.text);
     keyValuePairs = extracted.keyValuePairs;
     tablesPreview = extracted.tablesPreview;
+    finalCategory = extracted.finalCategory ?? category;
+    invoiceFields = extracted.invoiceFields;
+    receiptFields = extracted.receiptFields;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[documents.upload] Document analysis failed", e);
@@ -196,6 +235,7 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
 
   const doc = await DocumentModel.create({
     userId: new mongoose.Types.ObjectId(userId),
+    category: finalCategory,
     originalName,
     blobPath,
     contentType,
@@ -206,6 +246,8 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
     detectedLanguage,
     keyPhrases,
     entities,
+    invoiceFields,
+    receiptFields,
   });
 
   void indexDocumentRow({
@@ -224,6 +266,7 @@ export const uploadDocument = async (req: Request, res: Response): Promise<void>
       originalName: doc.originalName,
       contentType: doc.contentType,
       sizeBytes: doc.sizeBytes,
+      category: doc.category,
       createdAt: doc.createdAt,
     },
   });
@@ -250,7 +293,7 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
     return;
   }
 
-  const usageSnapshot = await getUsageSnapshot(userId);
+  const usageSnapshot = await getUsageSnapshot();
   if (usageSnapshot.used >= usageSnapshot.limit) {
     res.status(429).json({
       message: "For your project, monthly chat limit exceeded.",
@@ -277,14 +320,14 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
     const reply = await chatAboutDocument(combinedContext, message, replyLanguage);
     await ChatUsageModel.updateOne(
       {
-        userId: new mongoose.Types.ObjectId(userId),
+        scope: "global",
         monthKey: usageSnapshot.monthKey,
       },
       { $inc: { chatCount: 1 } },
       { upsert: true },
     );
 
-    const usage = await getUsageSnapshot(userId);
+    const usage = await getUsageSnapshot();
     res.json({ reply, usage });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Chat failed";
@@ -292,8 +335,8 @@ export const chatDocument = async (req: Request, res: Response): Promise<void> =
   }
 };
 
-export const getChatUsage = async (req: Request, res: Response): Promise<void> => {
-  const usage = await getUsageSnapshot(req.userId!);
+export const getChatUsage = async (_req: Request, res: Response): Promise<void> => {
+  const usage = await getUsageSnapshot();
   res.json(usage);
 };
 
