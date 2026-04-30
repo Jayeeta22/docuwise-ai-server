@@ -9,12 +9,19 @@ const sanitizeEmail = (email: string): string => email.trim().toLowerCase();
 const signToken = (userId: string): string =>
   jwt.sign({ sub: userId }, env.jwtSecret, { expiresIn: "7d" });
 
+const isProduction = env.nodeEnv === "production";
+
+/** Cross-origin UI (e.g. Vercel → Render) requires SameSite=None; Secure. */
+const authCookieBase = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: (isProduction ? "none" : "lax") as "none" | "lax",
+  path: "/",
+};
+
 const setAuthCookie = (res: Response, token: string): void => {
   res.cookie("token", token, {
-    httpOnly: true,
-    secure: env.nodeEnv === "production",
-    sameSite: "lax",
-    path: "/",
+    ...authCookieBase,
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 };
@@ -71,12 +78,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const logout = async (_req: Request, res: Response): Promise<void> => {
-  res.clearCookie("token", {
-    httpOnly: true,
-    secure: env.nodeEnv === "production",
-    sameSite: "lax",
-    path: "/",
-  });
+  res.clearCookie("token", { ...authCookieBase });
   res.status(200).json({ message: "Logged out." });
 };
 
