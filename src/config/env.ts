@@ -11,12 +11,6 @@ for (const key of required) {
 
 const trim = (value: string | undefined): string => (typeof value === "string" ? value.trim() : "");
 
-function parseCommaSeparated(value: string | undefined): string[] {
-  const normalized = trim(value);
-  if (!normalized) return [];
-  return normalized.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
 const firstNonEmpty = (...values: Array<string | undefined>): string => {
   for (const value of values) {
     const normalized = trim(value);
@@ -25,21 +19,9 @@ const firstNonEmpty = (...values: Array<string | undefined>): string => {
   return "";
 };
 
-const nodeEnv = process.env.NODE_ENV ?? "development";
-const corsSource = firstNonEmpty(process.env.CORS_ORIGINS, process.env.CLIENT_URL);
-const corsOriginsParsed = parseCommaSeparated(corsSource);
-if (nodeEnv === "production" && corsOriginsParsed.length === 0) {
-  throw new Error(
-    "Set CORS_ORIGINS in production (comma-separated UI origins). Example: CORS_ORIGINS=https://app.vercel.app",
-  );
-}
-const corsOrigins = corsOriginsParsed.length > 0 ? corsOriginsParsed : ["http://localhost:5173"];
-
 export const env = {
   port: Number(process.env.PORT ?? 3001),
-  nodeEnv,
-  /** Browser origins allowed when NODE_ENV=production (see app CORS). Comma-separated in CORS_ORIGINS env. */
-  corsOrigins,
+  nodeEnv: process.env.NODE_ENV ?? "development",
   mongodbUri: process.env.MONGODB_URI as string,
   mongodbUriFallback: process.env.MONGODB_URI_FALLBACK,
   jwtSecret: process.env.JWT_SECRET as string,
